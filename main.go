@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-var wg sync.WaitGroup
-
 type Candle struct {
 	ticker string
 	price  float64
@@ -23,7 +21,7 @@ func makeCandle(r string) (*Candle, error) {
 	const (
 		Ticker = iota
 		Price
-		Time = 3
+		Time   = 3
 		Layout = "2006-01-02 15:04:05"
 	)
 	rec := strings.Split(r, ",")
@@ -31,7 +29,7 @@ func makeCandle(r string) (*Candle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("can't convert price string into float64: %v", err)
 	}
-	
+
 	t, err := time.Parse(Layout, rec[Time])
 	if err != nil {
 		return nil, fmt.Errorf("can't convert initial time string into Time: %v", err)
@@ -42,14 +40,13 @@ func makeCandle(r string) (*Candle, error) {
 		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
 
-
 	out := &Candle{rec[Ticker], pr, tt}
 
 	fmt.Println(out)
 	return out, nil
 }
 
-func readCSVFile(fileName string) (chan string, chan error, error) {
+func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, error) {
 	defer wg.Done()
 	file, err := os.Open(fileName)
 	if err != nil {
@@ -78,7 +75,7 @@ func readCSVFile(fileName string) (chan string, chan error, error) {
 	return records, errc, nil
 }
 
-func processing(in chan string) (chan *Candle, chan error) {
+func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
 	defer wg.Done()
 	//candles := make(map[string]*Candle)
 	out := make(chan *Candle)
@@ -88,7 +85,6 @@ func processing(in chan string) (chan *Candle, chan error) {
 
 		for rec := range in {
 			c, err := makeCandle(rec)
-			fmt.Println(c)
 			if err != nil {
 				errc <- err
 				return
@@ -101,34 +97,35 @@ func processing(in chan string) (chan *Candle, chan error) {
 	return out, nil
 }
 
-func temp(in chan string) chan *Candle {
-	wg.Done()
-
-	out := make(chan *Candle)
-	go func() {
-		for i := range in {
-			c, _ := makeCandle(i)
-			out <- c
-		}
-		close(out)
-	}()
-
-	return out
-}
+//func temp(in chan string) chan *Candle {
+//	wg.Done()
+//
+//	out := make(chan *Candle)
+//	go func() {
+//		for i := range in {
+//			c, _ := makeCandle(i)
+//			out <- c
+//		}
+//		close(out)
+//	}()
+//
+//	return out
+//}
 
 func main() {
+	var wg sync.WaitGroup
 	var errcList []<-chan error
 
 	wg.Add(1)
-	records, errc, err := readCSVFile("trades.csv")
+	records, errc, err := readCSVFile("trades.csv", &wg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	errcList = append(errcList, errc)
 
 	wg.Add(1)
-	//out, _ := processing(records)
-	out := temp(records)
+	out, errc := processing(records, &wg)
+	errcList = append(errcList, errc)
 	wg.Wait()
 	done := make(chan int)
 	go func() {
