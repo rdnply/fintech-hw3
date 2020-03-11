@@ -12,10 +12,21 @@ import (
 	"time"
 )
 
+const (
+	Five = iota
+	Thirty
+	TwoHForty
+	Unknown
+)
+
 type Candle struct {
 	ticker string
-	price  float64
+	openPrice float64
+	maxPrice float64
+	minPrice float64
+	closePrice float64
 	time   time.Time
+	scale int
 }
 
 func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, error) {
@@ -47,53 +58,59 @@ func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, 
 	return records, errc, nil
 }
 
-func exists(fileName string) bool {
-	_, err := os.Stat(fileName)
+//func exists(fileName string) bool {
+//	_, err := os.Stat(fileName)
+//
+//	return !os.IsNotExist(err)
+//}
 
-	return !os.IsNotExist(err)
-}
+//func getFileRef(fileName string) (*os.File, error) {
+//	if exists(fileName) {
+//		f, err := os.Open(fileName)
+//		if err != nil {
+//			return nil, fmt.Errorf("unable to read input file %s, %v", fileName, err)
+//		}
+//
+//		return f, nil
+//	} else {
+//		f, err := os.Create(fileName)
+//		if err != nil {
+//			return nil, fmt.Errorf("can't create file with name: %s, %v", fileName, err)
+//		}
+//
+//		return f, nil
+//	}
+//}
 
-func getFileRef(fileName string) (*os.File, error) {
-	if exists(fileName) {
-		f, err := os.Open(fileName)
-		if err != nil {
-			return nil, fmt.Errorf("unable to read input file %s, %v", fileName, err)
-		}
-
-		return f, nil
-	} else {
-		f, err := os.Create(fileName)
-		if err != nil {
-			return nil, fmt.Errorf("can't create file with name: %s, %v", fileName, err)
-		}
-
-		return f, nil
-	}
-}
-
-func writeLineInCSVFile(record []string, fileName string) error {
-	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	w := csv.NewWriter(file)
-	err = w.Write(record)
-	w.Flush()
-	if err != nil {
-		return fmt.Errorf("trouble with writing string in file: %v", err)
-	}
-	return nil
-}
+//func writeLineInCSVFile(record []string, fileName string) error {
+//	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+//	if err != nil {
+//		return err
+//	}
+//	defer file.Close()
+//
+//	w := csv.NewWriter(file)
+//	err = w.Write(record)
+//	w.Flush()
+//	if err != nil {
+//		return fmt.Errorf("trouble with writing string in file: %v", err)
+//	}
+//	return nil
+//}
 
 func (c *Candle) toSlice() []string {
 	s := make([]string, 0)
 	s = append(s, c.ticker)
-	pr := strconv.FormatFloat(c.price, 'f', -1, 64)
-	s = append(s, pr)
 	t := c.time.Format(time.RFC3339)
 	s = append(s, t)
+	pr := strconv.FormatFloat(c.openPrice, 'f', -1, 64)
+	s = append(s, pr)
+	pr = strconv.FormatFloat(c.maxPrice, 'f', -1, 64)
+	s = append(s, pr)
+	pr = strconv.FormatFloat(c.minPrice, 'f', -1, 64)
+	s = append(s, pr)
+	pr = strconv.FormatFloat(c.closePrice, 'f', -1, 64)
+	s = append(s, pr)
 
 	return s
 }
@@ -121,7 +138,7 @@ func makeCandle(r string) (*Candle, error) {
 		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
 
-	out := &Candle{rec[Ticker], pr, tt}
+	out := &Candle{rec[Ticker], pr, pr, pr, pr,tt, Unknown}
 
 	//fmt.Println(out)
 	return out, nil
@@ -149,26 +166,63 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
 	return out, nil
 }
 
-func printing(in chan *Candle, wg *sync.WaitGroup, done chan int) chan error {
-	//defer wg.Done()
-	errc := make(chan error)
+func makeFiles(names []string) ([]*os.File, error) {
+	files := make([]*os.File, 0)
+	for _, n := range names {
+		f, err := os.OpenFile(n, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("can't open file with name: %s, %v", n, err)
+		}
+		files = append(files, f)
+	}
 
+	return files, nil
+}
+
+func closeFiles(files [] *os.File){
+	for _, f := range files {
+		f.Close()
+	}
+}
+
+func write(in chan *Candle, wg *sync.WaitGroup, done chan int, names []string) (chan error, error) {
+	defer wg.Done()
+	files, err := makeFiles(names)
+	if err != nil {
+		return nil, err
+	}
+
+	errc := make(chan error)
 	go func() {
 		defer close(errc)
 
+		var w *csv.Writer
 		for c := range in {
+			switch {
+			case c.scale == Five:
+				w = csv.NewWriter(files[Five])
+			case c.scale == Thirty:
+				w = csv.NewWriter(files[Thirty])
+			case c.scale == TwoHForty:
+				w = csv.NewWriter(files[TwoHForty])
+
+			}
+
 			s := c.toSlice()
 			fmt.Println(s)
-			err := writeLineInCSVFile(s, "out.csv")
+
+			err := w.Write(s)
+			w.Flush()
 			if err != nil {
-				errc <- err
+				errc <- fmt.Errorf("trouble with writing string in file: %v", err)
 				return
 			}
 		}
+		closeFiles(files)
 		done <- 1
 	}()
 
-	return errc
+	return errc, nil
 }
 
 func main() {
@@ -186,9 +240,33 @@ func main() {
 	out, errc := processing(records, &wg)
 	errcList = append(errcList, errc)
 	done := make(chan int)
-	//wg.Add(1)
-	errc = printing(out, &wg, done)
+	names := []string{"candles5.csv", "candles15.csv"}
+	wg.Add(1)
+	errc, err = write(out, &wg, done, names)
+	if err != nil {
+		log.Fatal(err)
+	}
 	errcList = append(errcList, errc)
+
+
+	//go func() {
+	//	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	//	if err != nil {
+	//		log.Fatal(err)
+	//	}
+	//	defer file.Close()
+	//	for i := range out {
+	//		s := i.toSlice()
+	//		fmt.Println(s)
+	//		w := csv.NewWriter(file)
+	//		err = w.Write(s)
+	//		w.Flush()
+	//		if err != nil {
+	//			log.Fatal(err)
+	//		}
+	//	}
+	//	done <- 1
+	//}()
 	wg.Wait()
 	<-done
 }
