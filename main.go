@@ -20,13 +20,13 @@ const (
 )
 
 type Candle struct {
-	ticker string
-	openPrice float64
-	maxPrice float64
-	minPrice float64
+	ticker     string
+	openPrice  float64
+	maxPrice   float64
+	minPrice   float64
 	closePrice float64
-	time   time.Time
-	scale int
+	time       time.Time
+	scale      int
 }
 
 func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, error) {
@@ -57,46 +57,6 @@ func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, 
 
 	return records, errc, nil
 }
-
-//func exists(fileName string) bool {
-//	_, err := os.Stat(fileName)
-//
-//	return !os.IsNotExist(err)
-//}
-
-//func getFileRef(fileName string) (*os.File, error) {
-//	if exists(fileName) {
-//		f, err := os.Open(fileName)
-//		if err != nil {
-//			return nil, fmt.Errorf("unable to read input file %s, %v", fileName, err)
-//		}
-//
-//		return f, nil
-//	} else {
-//		f, err := os.Create(fileName)
-//		if err != nil {
-//			return nil, fmt.Errorf("can't create file with name: %s, %v", fileName, err)
-//		}
-//
-//		return f, nil
-//	}
-//}
-
-//func writeLineInCSVFile(record []string, fileName string) error {
-//	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-//	if err != nil {
-//		return err
-//	}
-//	defer file.Close()
-//
-//	w := csv.NewWriter(file)
-//	err = w.Write(record)
-//	w.Flush()
-//	if err != nil {
-//		return fmt.Errorf("trouble with writing string in file: %v", err)
-//	}
-//	return nil
-//}
 
 func (c *Candle) toSlice() []string {
 	s := make([]string, 0)
@@ -133,35 +93,12 @@ func makeCandle(r string) (*Candle, error) {
 		return nil, fmt.Errorf("can't convert initial time string into Time: %v", err)
 	}
 
-	tt, err := time.Parse(time.RFC3339, t.Format(time.RFC3339))
+	rfc, err := time.Parse(time.RFC3339, t.Format(time.RFC3339))
 	if err != nil {
 		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
 
-	out := &Candle{rec[Ticker], pr, pr, pr, pr,tt, Unknown}
-
-	//fmt.Println(out)
-	return out, nil
-}
-
-func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
-	defer wg.Done()
-	//candles := make(map[string]*Candle)
-	out := make(chan *Candle)
-	errc := make(chan error)
-	go func() {
-		defer close(errc)
-
-		for rec := range in {
-			c, err := makeCandle(rec)
-			if err != nil {
-				errc <- err
-				return
-			}
-			out <- c
-		}
-		close(out)
-	}()
+	out := &Candle{rec[Ticker], pr, pr, pr, pr, rfc, Five}
 
 	return out, nil
 }
@@ -179,14 +116,13 @@ func makeFiles(names []string) ([]*os.File, error) {
 	return files, nil
 }
 
-func closeFiles(files [] *os.File){
+func closeFiles(files []*os.File) {
 	for _, f := range files {
 		f.Close()
 	}
 }
 
 func write(in chan *Candle, wg *sync.WaitGroup, done chan int, names []string) (chan error, error) {
-	defer wg.Done()
 	files, err := makeFiles(names)
 	if err != nil {
 		return nil, err
@@ -225,6 +161,54 @@ func write(in chan *Candle, wg *sync.WaitGroup, done chan int, names []string) (
 	return errc, nil
 }
 
+func inInterval(t time.Time) (bool, error) {
+	const (
+		Start = "2019-01-30T07:00:00Z"
+		End   = "2019-02-01T00:00:00Z"
+	)
+	s, err := time.Parse(time.RFC3339, Start)
+	if err != nil {
+		return false, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+	}
+
+	e, err := time.Parse(time.RFC3339, End)
+	if err != nil {
+		return false, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+	}
+
+	return t.After(s) && t.Before(e), nil
+}
+
+func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
+	defer wg.Done()
+	//candles := make(map[string]*Candle)
+	out := make(chan *Candle)
+	errc := make(chan error)
+	go func() {
+		defer close(errc)
+
+		for rec := range in {
+			c, err := makeCandle(rec)
+			if err != nil {
+				errc <- err
+				return
+			}
+			ok, err := inInterval(c.time)
+			if err != nil {
+				errc <- err
+				return
+			}
+			if ok {
+				out <- c
+			}
+
+		}
+		close(out)
+	}()
+
+	return out, nil
+}
+
 func main() {
 	var wg sync.WaitGroup
 	var errcList []<-chan error
@@ -241,32 +225,12 @@ func main() {
 	errcList = append(errcList, errc)
 	done := make(chan int)
 	names := []string{"candles5.csv", "candles15.csv"}
-	wg.Add(1)
 	errc, err = write(out, &wg, done, names)
 	if err != nil {
 		log.Fatal(err)
 	}
 	errcList = append(errcList, errc)
 
-
-	//go func() {
-	//	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-	//	if err != nil {
-	//		log.Fatal(err)
-	//	}
-	//	defer file.Close()
-	//	for i := range out {
-	//		s := i.toSlice()
-	//		fmt.Println(s)
-	//		w := csv.NewWriter(file)
-	//		err = w.Write(s)
-	//		w.Flush()
-	//		if err != nil {
-	//			log.Fatal(err)
-	//		}
-	//	}
-	//	done <- 1
-	//}()
 	wg.Wait()
 	<-done
 }
