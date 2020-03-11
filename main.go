@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/csv"
 	"fmt"
 	"log"
 	"os"
@@ -15,35 +16,6 @@ type Candle struct {
 	ticker string
 	price  float64
 	time   time.Time
-}
-
-func makeCandle(r string) (*Candle, error) {
-	const (
-		Ticker = iota
-		Price
-		Time   = 3
-		Layout = "2006-01-02 15:04:05"
-	)
-	rec := strings.Split(r, ",")
-	pr, err := strconv.ParseFloat(rec[Price], 64)
-	if err != nil {
-		return nil, fmt.Errorf("can't convert price string into float64: %v", err)
-	}
-
-	t, err := time.Parse(Layout, rec[Time])
-	if err != nil {
-		return nil, fmt.Errorf("can't convert initial time string into Time: %v", err)
-	}
-
-	tt, err := time.Parse(time.RFC3339, t.Format(time.RFC3339))
-	if err != nil {
-		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
-	}
-
-	out := &Candle{rec[Ticker], pr, tt}
-
-	fmt.Println(out)
-	return out, nil
 }
 
 func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, error) {
@@ -75,6 +47,86 @@ func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, 
 	return records, errc, nil
 }
 
+func exists(fileName string) bool {
+	_, err := os.Stat(fileName)
+
+	return !os.IsNotExist(err)
+}
+
+func getFileRef(fileName string) (*os.File, error) {
+	if exists(fileName) {
+		f, err := os.Open(fileName)
+		if err != nil {
+			return nil, fmt.Errorf("unable to read input file %s, %v", fileName, err)
+		}
+
+		return f, nil
+	} else {
+		f, err := os.Create(fileName)
+		if err != nil {
+			return nil, fmt.Errorf("can't create file with name: %s, %v", fileName, err)
+		}
+
+		return f, nil
+	}
+}
+
+func writeLineInCSVFile(record []string, fileName string) error {
+	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	w := csv.NewWriter(file)
+	err = w.Write(record)
+	w.Flush()
+	if err != nil {
+		return fmt.Errorf("trouble with writing string in file: %v", err)
+	}
+	return nil
+}
+
+func (c *Candle) toSlice() []string {
+	s := make([]string, 0)
+	s = append(s, c.ticker)
+	pr := strconv.FormatFloat(c.price, 'f', -1, 64)
+	s = append(s, pr)
+	t := c.time.Format(time.RFC3339)
+	s = append(s, t)
+
+	return s
+}
+
+func makeCandle(r string) (*Candle, error) {
+	const (
+		Ticker = iota
+		Price
+		Time   = 3
+		Layout = "2006-01-02 15:04:05"
+	)
+	rec := strings.Split(r, ",")
+	pr, err := strconv.ParseFloat(rec[Price], 64)
+	if err != nil {
+		return nil, fmt.Errorf("can't convert price string into float64: %v", err)
+	}
+
+	t, err := time.Parse(Layout, rec[Time])
+	if err != nil {
+		return nil, fmt.Errorf("can't convert initial time string into Time: %v", err)
+	}
+
+	tt, err := time.Parse(time.RFC3339, t.Format(time.RFC3339))
+	if err != nil {
+		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+	}
+
+	out := &Candle{rec[Ticker], pr, tt}
+
+	//fmt.Println(out)
+	return out, nil
+}
+
 func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
 	defer wg.Done()
 	//candles := make(map[string]*Candle)
@@ -97,20 +149,27 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
 	return out, nil
 }
 
-//func temp(in chan string) chan *Candle {
-//	wg.Done()
-//
-//	out := make(chan *Candle)
-//	go func() {
-//		for i := range in {
-//			c, _ := makeCandle(i)
-//			out <- c
-//		}
-//		close(out)
-//	}()
-//
-//	return out
-//}
+func printing(in chan *Candle, wg *sync.WaitGroup, done chan int) chan error {
+	//defer wg.Done()
+	errc := make(chan error)
+
+	go func() {
+		defer close(errc)
+
+		for c := range in {
+			s := c.toSlice()
+			fmt.Println(s)
+			err := writeLineInCSVFile(s, "out.csv")
+			if err != nil {
+				errc <- err
+				return
+			}
+		}
+		done <- 1
+	}()
+
+	return errc
+}
 
 func main() {
 	var wg sync.WaitGroup
@@ -126,14 +185,10 @@ func main() {
 	wg.Add(1)
 	out, errc := processing(records, &wg)
 	errcList = append(errcList, errc)
-	wg.Wait()
 	done := make(chan int)
-	go func() {
-		for i := range out {
-			fmt.Println(i)
-		}
-		done <- 1
-	}()
+	//wg.Add(1)
+	errc = printing(out, &wg, done)
+	errcList = append(errcList, errc)
+	wg.Wait()
 	<-done
-
 }
