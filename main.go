@@ -200,14 +200,18 @@ func updateCandle(candles map[string]*Candle, c *Candle) {
 	}
 }
 
-
-func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle,  wg *sync.WaitGroup) error, error) {
+func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle, wg *sync.WaitGroup) error, error) {
 	const (
 		Start = "2019-01-30T07:00:00Z"
 	)
 	var mu sync.Mutex
 	candles := make(map[string]*Candle)
 	startTime, err := time.Parse(time.RFC3339, Start)
+	scales := map[time.Duration]int{
+		5 * time.Minute:   Five,
+		30 * time.Minute:  Thirty,
+		240 * time.Minute: TwoHForty,
+	}
 	if err != nil {
 		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
@@ -216,23 +220,12 @@ func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle,  wg *sync.
 		go func() {
 			defer wg.Done()
 			mu.Lock()
-			ti := c.time.Format(time.RFC3339)
-			//fmt.Println(candles)
-			if ti == "2019-01-30T07:04:59Z" {
-				fmt.Println("here")
-			}
-
 			diff := c.time.Sub(startTime).Minutes()
 
-			if diff < 0 {
-				fmt.Println("NEGATIVE")
-			}
-
 			if diff >= d.Minutes() {
-
 				for t := range candles {
 					candles[t].time = startTime
-					candles[t].scale = Five
+					candles[t].scale = scales[d]
 					out <- candles[t]
 					delete(candles, t)
 				}
@@ -249,21 +242,21 @@ func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle,  wg *sync.
 }
 
 func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, error) {
-	const (
-		m5    = 5
-		m30   = 6
-		m240  = 48
-		Start = "2019-01-30T07:00:00Z"
-	)
 	defer wg.Done()
-	//var eg errgroup.Group
-	//var mu sync.Mutex
 	var w sync.WaitGroup
 
 	out := make(chan *Candle)
 	errc := make(chan error)
 
-	h5, err := handleCandle(5*time.Minute)
+	h5, err := handleCandle(5 * time.Minute)
+	if err != nil {
+		return nil, nil, err
+	}
+	h30, err := handleCandle(30 * time.Minute)
+	if err != nil {
+		return nil, nil, err
+	}
+	h240, err := handleCandle(240 * time.Minute)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -273,7 +266,6 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 
 		for rec := range in {
 			c, err := makeCandle(rec)
-			//fmt.Println(c.toSlice())
 			if err != nil {
 				errc <- err
 				return
@@ -291,18 +283,23 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 					errc <- err
 					return
 				}
-				//eg.Go(func() error{
-				//	return h30(c, out)
-				//})
-				//eg.Go(func() error{
-				//	return h240(c, out)
-				//})
+				w.Add(1)
+				err = h30(c, out, &w)
+				w.Wait()
+				if err != nil {
+					errc <- err
+					return
+				}
+				w.Add(1)
+				err = h240(c, out, &w)
+				w.Wait()
+				if err != nil {
+					errc <- err
+					return
+				}
+
 			}
 		}
-		//if err := eg.Wait(); err != nil {
-		//	errc <- err
-		//	return
-		//}
 
 		close(out)
 	}()
@@ -312,7 +309,7 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 
 func main() {
 	var (
-		wg sync.WaitGroup
+		wg       sync.WaitGroup
 		errcList []<-chan error
 	)
 
