@@ -202,134 +202,11 @@ func updateCandle(candles map[string]*Candle, c *Candle) {
 }
 
 
-
-//func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, error) {
-//	const (
-//		m5    = 5
-//		m30   = 6
-//		m240  = 48
-//		Start = "2019-01-30T07:00:00Z"
-//	)
-//
-//	defer wg.Done()
-//	var eg errgroup.Group
-//
-//	startTime5, err := time.Parse(time.RFC3339, Start)
-//	startTime30, err := time.Parse(time.RFC3339, Start)
-//	startTime240, err := time.Parse(time.RFC3339, Start)
-//
-//
-//	if err != nil {
-//		return nil, nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
-//	}
-//	cntFives := 0
-//	candles := make(map[string]*Candle)
-//
-//	out := make(chan *Candle)
-//	errc := make(chan error)
-//
-//	go func() {
-//		defer close(errc)
-//
-//		for rec := range in {
-//			c, err := makeCandle(rec)
-//			if err != nil {
-//				errc <- err
-//				return
-//			}
-//			ok, err := inInterval(c.time)
-//			if err != nil {
-//				errc <- err
-//				return
-//			}
-//			if ok {
-//				diff := c.time.Sub(startTime5).Minutes()
-//
-//				if diff >= m5 {
-//					for t := range candles {
-//						candles[t].time = startTime5
-//						candles[t].scale = Five
-//						out <- candles[t]
-//						delete(candles, t)
-//					}
-//					cntFives++
-//					startTime5 = startTime5.Add(time.Minute * m5)
-//				}
-//
-//
-//					//case cntFives == m240:
-//					//	cntFives = 0
-//					//	for t := range candles {
-//					//		start := startTime5.Add(time.Hour * -4)
-//					//		candles[t].time = start
-//					//		candles[t].scale = TwoHForty
-//					//		out <- candles[t]
-//					//	}
-//					//
-//					//case cntFives % m30 == 0 && cntFives != 0:
-//					//	for t := range candles {
-//					//		start := startTime5.Add(time.Minute * -30)
-//					//		candles[t].time = start
-//					//		candles[t].scale = Thirty
-//					//		out <- candles[t]
-//					//	}
-//
-//			}
-//			updateCandle(candles, c)
-//		}
-//		for t := range candles {
-//			candles[t].time = startTime5
-//			candles[t].scale = Five
-//			out <- candles[t]
-//
-//			start := startTime5.Add(time.Minute * -30)
-//			candles[t].time = start
-//			candles[t].scale = Thirty
-//			out <- candles[t]
-//
-//			start = startTime5.Add(time.Hour * -4)
-//			candles[t].time = start
-//			candles[t].scale = TwoHForty
-//			out <- candles[t]
-//		}
-//		close(out)
-//	}()
-//
-//	return out, nil, nil
-//}
-
-//func handleCandle(d time.Duration, c *Candle, out chan *Candle) error {
-//	const (
-//		Start = "2019-01-30T07:00:00Z"
-//	)
-//
-//	candles := make(map[string]*Candle)
-//	startTime, err := time.Parse(time.RFC3339, Start)
-//	if err != nil {
-//		return fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
-//	}
-//
-//	diff := c.time.Sub(startTime).Minutes()
-//
-//	if diff >= d.Minutes() {
-//		for t := range candles {
-//			candles[t].time = startTime
-//			candles[t].scale = Five
-//			out <- candles[t]
-//			delete(candles, t)
-//		}
-//		startTime = startTime.Add(d)
-//	}
-//
-//	updateCandle(candles, c)
-//
-//	return nil
-//}
-
 func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle) error, error) {
 	const (
 		Start = "2019-01-30T07:00:00Z"
 	)
+	var mu sync.Mutex
 	candles := make(map[string]*Candle)
 	startTime, err := time.Parse(time.RFC3339, Start)
 	if err != nil {
@@ -337,24 +214,36 @@ func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle) error, err
 	}
 
 	return func(c *Candle, out chan *Candle) error {
-		diff := c.time.Sub(startTime).Minutes()
-
-		if diff >= d.Minutes() {
-			for t := range candles {
-				candles[t].time = startTime
-				candles[t].scale = Five
-				out <- candles[t]
-				delete(candles, t)
+		go func() {
+			mu.Lock()
+			ti := c.time.Format(time.RFC3339)
+			//fmt.Println(candles)
+			if ti == "2019-01-30T07:04:59Z" {
+				fmt.Println("here")
 			}
-			startTime = startTime.Add(d)
-		}
 
-		updateCandle(candles, c)
+			diff := c.time.Sub(startTime).Minutes()
+
+
+			if diff >= d.Minutes() {
+
+				for t := range candles {
+					candles[t].time = startTime
+					candles[t].scale = Five
+					out <- candles[t]
+					delete(candles, t)
+				}
+
+				startTime = startTime.Add(d)
+
+			}
+			updateCandle(candles, c)
+			mu.Unlock()
+		}()
 
 		return nil
 	}, nil
 }
-
 
 func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, error) {
 	const (
@@ -365,6 +254,7 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 	)
 	defer wg.Done()
 	var eg errgroup.Group
+	var mu sync.Mutex
 
 	out := make(chan *Candle)
 	errc := make(chan error)
@@ -386,6 +276,7 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 
 		for rec := range in {
 			c, err := makeCandle(rec)
+			//fmt.Println(c.toSlice())
 			if err != nil {
 				errc <- err
 				return
@@ -396,9 +287,13 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 				return
 			}
 			if ok {
-				eg.Go(func() error{
-					return h5(c, out)
-				})
+				mu.Lock()
+				err := h5(c, out)
+				mu.Unlock()
+				if err != nil {
+					errc <- err
+					return
+				}
 				//eg.Go(func() error{
 				//	return h30(c, out)
 				//})
@@ -425,7 +320,7 @@ func main() {
 	)
 
 	wg.Add(1)
-	records, errc, err := readCSVFile("tr.csv", &wg)
+	records, errc, err := readCSVFile("trades.csv", &wg)
 	if err != nil {
 		log.Fatal(err)
 	}
