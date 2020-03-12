@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/csv"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"log"
 	"os"
 	"strconv"
@@ -98,7 +99,7 @@ func makeCandle(r string) (*Candle, error) {
 		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
 
-	out := &Candle{rec[Ticker], pr, pr, pr, pr, rfc, Five}
+	out := &Candle{rec[Ticker], pr, pr, pr, pr, rfc, Unknown}
 
 	return out, nil
 }
@@ -122,7 +123,7 @@ func closeFiles(files []*os.File) {
 	}
 }
 
-func write(in chan *Candle, wg *sync.WaitGroup, done chan int, names []string) (chan error, error) {
+func write(in chan *Candle, done chan int, names []string) (chan error, error) {
 	files, err := makeFiles(names)
 	if err != nil {
 		return nil, err
@@ -179,11 +180,207 @@ func inInterval(t time.Time) (bool, error) {
 	return t.After(s) && t.Before(e), nil
 }
 
-func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
+func updatePrice(o *Candle, n *Candle) *Candle {
+	res := o
+	if res.maxPrice < n.openPrice {
+		res.maxPrice = n.openPrice
+	}
+
+	if res.minPrice > n.openPrice {
+		res.minPrice = n.openPrice
+	}
+	res.closePrice = n.openPrice
+	return res
+}
+
+func updateCandle(candles map[string]*Candle, c *Candle) {
+	if _, ok := candles[c.ticker]; ok {
+		candles[c.ticker] = updatePrice(candles[c.ticker], c)
+	} else {
+		candles[c.ticker] = c
+	}
+}
+
+
+
+//func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, error) {
+//	const (
+//		m5    = 5
+//		m30   = 6
+//		m240  = 48
+//		Start = "2019-01-30T07:00:00Z"
+//	)
+//
+//	defer wg.Done()
+//	var eg errgroup.Group
+//
+//	startTime5, err := time.Parse(time.RFC3339, Start)
+//	startTime30, err := time.Parse(time.RFC3339, Start)
+//	startTime240, err := time.Parse(time.RFC3339, Start)
+//
+//
+//	if err != nil {
+//		return nil, nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+//	}
+//	cntFives := 0
+//	candles := make(map[string]*Candle)
+//
+//	out := make(chan *Candle)
+//	errc := make(chan error)
+//
+//	go func() {
+//		defer close(errc)
+//
+//		for rec := range in {
+//			c, err := makeCandle(rec)
+//			if err != nil {
+//				errc <- err
+//				return
+//			}
+//			ok, err := inInterval(c.time)
+//			if err != nil {
+//				errc <- err
+//				return
+//			}
+//			if ok {
+//				diff := c.time.Sub(startTime5).Minutes()
+//
+//				if diff >= m5 {
+//					for t := range candles {
+//						candles[t].time = startTime5
+//						candles[t].scale = Five
+//						out <- candles[t]
+//						delete(candles, t)
+//					}
+//					cntFives++
+//					startTime5 = startTime5.Add(time.Minute * m5)
+//				}
+//
+//
+//					//case cntFives == m240:
+//					//	cntFives = 0
+//					//	for t := range candles {
+//					//		start := startTime5.Add(time.Hour * -4)
+//					//		candles[t].time = start
+//					//		candles[t].scale = TwoHForty
+//					//		out <- candles[t]
+//					//	}
+//					//
+//					//case cntFives % m30 == 0 && cntFives != 0:
+//					//	for t := range candles {
+//					//		start := startTime5.Add(time.Minute * -30)
+//					//		candles[t].time = start
+//					//		candles[t].scale = Thirty
+//					//		out <- candles[t]
+//					//	}
+//
+//			}
+//			updateCandle(candles, c)
+//		}
+//		for t := range candles {
+//			candles[t].time = startTime5
+//			candles[t].scale = Five
+//			out <- candles[t]
+//
+//			start := startTime5.Add(time.Minute * -30)
+//			candles[t].time = start
+//			candles[t].scale = Thirty
+//			out <- candles[t]
+//
+//			start = startTime5.Add(time.Hour * -4)
+//			candles[t].time = start
+//			candles[t].scale = TwoHForty
+//			out <- candles[t]
+//		}
+//		close(out)
+//	}()
+//
+//	return out, nil, nil
+//}
+
+//func handleCandle(d time.Duration, c *Candle, out chan *Candle) error {
+//	const (
+//		Start = "2019-01-30T07:00:00Z"
+//	)
+//
+//	candles := make(map[string]*Candle)
+//	startTime, err := time.Parse(time.RFC3339, Start)
+//	if err != nil {
+//		return fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+//	}
+//
+//	diff := c.time.Sub(startTime).Minutes()
+//
+//	if diff >= d.Minutes() {
+//		for t := range candles {
+//			candles[t].time = startTime
+//			candles[t].scale = Five
+//			out <- candles[t]
+//			delete(candles, t)
+//		}
+//		startTime = startTime.Add(d)
+//	}
+//
+//	updateCandle(candles, c)
+//
+//	return nil
+//}
+
+func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle) error, error) {
+	const (
+		Start = "2019-01-30T07:00:00Z"
+	)
+	candles := make(map[string]*Candle)
+	startTime, err := time.Parse(time.RFC3339, Start)
+	if err != nil {
+		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+	}
+
+	return func(c *Candle, out chan *Candle) error {
+		diff := c.time.Sub(startTime).Minutes()
+
+		if diff >= d.Minutes() {
+			for t := range candles {
+				candles[t].time = startTime
+				candles[t].scale = Five
+				out <- candles[t]
+				delete(candles, t)
+			}
+			startTime = startTime.Add(d)
+		}
+
+		updateCandle(candles, c)
+
+		return nil
+	}, nil
+}
+
+
+func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, error) {
+	const (
+		m5    = 5
+		m30   = 6
+		m240  = 48
+		Start = "2019-01-30T07:00:00Z"
+	)
 	defer wg.Done()
-	//candles := make(map[string]*Candle)
+	var eg errgroup.Group
+
 	out := make(chan *Candle)
 	errc := make(chan error)
+
+	h5, err := handleCandle(5*time.Minute)
+	if err != nil {
+		return nil, nil, err
+	}
+	//h30, err := handleCandle(30*time.Minute)
+	//if err != nil {
+	//	return nil, nil, err
+	//}
+	//h240, err := handleCandle(240*time.Minute)
+	//if err != nil {
+	//	return nil, nil, err
+	//}
 	go func() {
 		defer close(errc)
 
@@ -199,33 +396,50 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error) {
 				return
 			}
 			if ok {
-				out <- c
+				eg.Go(func() error{
+					return h5(c, out)
+				})
+				//eg.Go(func() error{
+				//	return h30(c, out)
+				//})
+				//eg.Go(func() error{
+				//	return h240(c, out)
+				//})
 			}
-
 		}
+		if err := eg.Wait(); err != nil {
+			errc <- err
+			return
+		}
+
 		close(out)
 	}()
 
-	return out, nil
+	return out, nil, nil
 }
 
 func main() {
-	var wg sync.WaitGroup
-	var errcList []<-chan error
+	var (
+		wg sync.WaitGroup
+		errcList []<-chan error
+	)
 
 	wg.Add(1)
-	records, errc, err := readCSVFile("trades.csv", &wg)
+	records, errc, err := readCSVFile("tr.csv", &wg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	errcList = append(errcList, errc)
 
 	wg.Add(1)
-	out, errc := processing(records, &wg)
+	out, errc, err := processing(records, &wg)
+	if err != nil {
+		log.Fatal(err)
+	}
 	errcList = append(errcList, errc)
 	done := make(chan int)
-	names := []string{"candles5.csv", "candles15.csv"}
-	errc, err = write(out, &wg, done, names)
+	names := []string{"candles5.csv", "candles30.csv", "candles240.csv"}
+	errc, err = write(out, done, names)
 	if err != nil {
 		log.Fatal(err)
 	}
