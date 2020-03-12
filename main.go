@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/csv"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"log"
 	"os"
 	"strconv"
@@ -202,7 +201,7 @@ func updateCandle(candles map[string]*Candle, c *Candle) {
 }
 
 
-func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle) error, error) {
+func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle,  wg *sync.WaitGroup) error, error) {
 	const (
 		Start = "2019-01-30T07:00:00Z"
 	)
@@ -213,8 +212,9 @@ func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle) error, err
 		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
 
-	return func(c *Candle, out chan *Candle) error {
+	return func(c *Candle, out chan *Candle, wg *sync.WaitGroup) error {
 		go func() {
+			defer wg.Done()
 			mu.Lock()
 			ti := c.time.Format(time.RFC3339)
 			//fmt.Println(candles)
@@ -224,6 +224,9 @@ func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle) error, err
 
 			diff := c.time.Sub(startTime).Minutes()
 
+			if diff < 0 {
+				fmt.Println("NEGATIVE")
+			}
 
 			if diff >= d.Minutes() {
 
@@ -253,8 +256,9 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 		Start = "2019-01-30T07:00:00Z"
 	)
 	defer wg.Done()
-	var eg errgroup.Group
-	var mu sync.Mutex
+	//var eg errgroup.Group
+	//var mu sync.Mutex
+	var w sync.WaitGroup
 
 	out := make(chan *Candle)
 	errc := make(chan error)
@@ -263,14 +267,7 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 	if err != nil {
 		return nil, nil, err
 	}
-	//h30, err := handleCandle(30*time.Minute)
-	//if err != nil {
-	//	return nil, nil, err
-	//}
-	//h240, err := handleCandle(240*time.Minute)
-	//if err != nil {
-	//	return nil, nil, err
-	//}
+
 	go func() {
 		defer close(errc)
 
@@ -287,9 +284,9 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 				return
 			}
 			if ok {
-				mu.Lock()
-				err := h5(c, out)
-				mu.Unlock()
+				w.Add(1)
+				err := h5(c, out, &w)
+				w.Wait()
 				if err != nil {
 					errc <- err
 					return
@@ -302,10 +299,10 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 				//})
 			}
 		}
-		if err := eg.Wait(); err != nil {
-			errc <- err
-			return
-		}
+		//if err := eg.Wait(); err != nil {
+		//	errc <- err
+		//	return
+		//}
 
 		close(out)
 	}()
