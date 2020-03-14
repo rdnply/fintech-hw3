@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -82,6 +83,10 @@ func makeCandle(r string) (*Candle, error) {
 		Time   = 3
 		Layout = "2006-01-02 15:04:05"
 	)
+	if r == "SBER,215.17,3,2019-01-31 06:59:33.000894" {
+		fmt.Println("HERE")
+	}
+
 	rec := strings.Split(r, ",")
 	pr, err := strconv.ParseFloat(rec[Price], 64)
 	if err != nil {
@@ -161,22 +166,20 @@ func write(in chan *Candle, done chan int, names []string) (chan error, error) {
 	return errc, nil
 }
 
-func inInterval(t time.Time) (bool, error) {
-	const (
-		Start = "2019-01-30T07:00:00Z"
-		End   = "2019-02-01T00:00:00Z"
+func sleep(t time.Time, s time.Time, e time.Time) bool {
+	numMin := func(t time.Time) int {
+		h, m, _ := t.Clock()
+		return h*60 + m
+	}
+	return numMin(t) >= numMin(s) && numMin(t) < numMin(e)
+}
+
+func inWorkInterval(t time.Time) bool {
+	var (
+		start = time.Date(2006, 1, 2, 0, 0, 0, 0, time.UTC)
+		end   = time.Date(2006, 1, 2, 7, 0, 0, 0, time.UTC)
 	)
-	s, err := time.Parse(time.RFC3339, Start)
-	if err != nil {
-		return false, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
-	}
-
-	e, err := time.Parse(time.RFC3339, End)
-	if err != nil {
-		return false, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
-	}
-
-	return t.After(s) && t.Before(e), nil
+	return !sleep(t, start, end)
 }
 
 func updatePrice(o *Candle, n *Candle) *Candle {
@@ -200,44 +203,61 @@ func updateCandle(candles map[string]*Candle, c *Candle) {
 	}
 }
 
-func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle, wg *sync.WaitGroup) error, error) {
+func diffMoreThanScale(diff float64, d time.Duration) bool {
+	return diff >= d.Minutes() && math.Abs(diff-d.Minutes()) > d.Minutes()
+}
+
+func handleCandle(d time.Duration) (func(c *Candle, out chan *Candle, wg *sync.WaitGroup), error) {
 	const (
 		Start = "2019-01-30T07:00:00Z"
 	)
 	var mu sync.Mutex
 	candles := make(map[string]*Candle)
 	startTime, err := time.Parse(time.RFC3339, Start)
+	if err != nil {
+		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
+	}
 	scales := map[time.Duration]int{
 		5 * time.Minute:   Five,
 		30 * time.Minute:  Thirty,
 		240 * time.Minute: TwoHForty,
 	}
-	if err != nil {
-		return nil, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
-	}
 
-	return func(c *Candle, out chan *Candle, wg *sync.WaitGroup) error {
+	return func(c *Candle, out chan *Candle, wg *sync.WaitGroup) {
 		go func() {
 			defer wg.Done()
-			mu.Lock()
-			diff := c.time.Sub(startTime).Minutes()
+			if c != nil {
+				mu.Lock()
+				diff := c.time.Sub(startTime).Minutes()
+				if diff >= d.Minutes() {
+					for t := range candles {
+						candles[t].time = startTime
+						candles[t].scale = scales[d]
+						out <- candles[t]
+						delete(candles, t)
+					}
 
-			if diff >= d.Minutes() {
+					if diffMoreThanScale(diff, d) {
+						startTime = c.time
+					} else {
+						startTime = startTime.Add(d)
+					}
+
+				}
+				updateCandle(candles, c)
+
+				mu.Unlock()
+			} else {
 				for t := range candles {
 					candles[t].time = startTime
 					candles[t].scale = scales[d]
 					out <- candles[t]
 					delete(candles, t)
 				}
-
-				startTime = startTime.Add(d)
-
 			}
-			updateCandle(candles, c)
-			mu.Unlock()
+
 		}()
 
-		return nil
 	}, nil
 }
 
@@ -270,36 +290,19 @@ func processing(in chan string, wg *sync.WaitGroup) (chan *Candle, chan error, e
 				errc <- err
 				return
 			}
-			ok, err := inInterval(c.time)
-			if err != nil {
-				errc <- err
-				return
-			}
-			if ok {
-				w.Add(1)
-				err := h5(c, out, &w)
+			if inWorkInterval(c.time) {
+				w.Add(3)
+				h5(c, out, &w)
+				h30(c, out, &w)
+				h240(c, out, &w)
 				w.Wait()
-				if err != nil {
-					errc <- err
-					return
-				}
-				w.Add(1)
-				err = h30(c, out, &w)
-				w.Wait()
-				if err != nil {
-					errc <- err
-					return
-				}
-				w.Add(1)
-				err = h240(c, out, &w)
-				w.Wait()
-				if err != nil {
-					errc <- err
-					return
-				}
-
 			}
 		}
+		w.Add(3)
+		h5(nil, out, &w)
+		h30(nil, out, &w)
+		h240(nil, out, &w)
+		w.Wait()
 
 		close(out)
 	}()
