@@ -59,8 +59,7 @@ func readCSVFile(fileName string, wg *sync.WaitGroup) (chan string, chan error, 
 	return records, errc, nil
 }
 
-//возможна проблема из-за указателя
-func (c *Candle) toSlice() []string {
+func (c Candle) toSlice() []string {
 	s := make([]string, 0)
 	s = append(s, c.ticker)
 	t := c.time.Format(time.RFC3339)
@@ -177,10 +176,7 @@ func inWorkInterval(t time.Time) bool {
 	return !sleep(t, start, end)
 }
 
-func updatePrice(o Candle, n Candle, wg *sync.WaitGroup) Candle {
-	defer wg.Done()
-	var mu sync.Mutex
-	mu.Lock()
+func updatePrice(o Candle, n Candle) Candle {
 	res := o
 	if res.maxPrice < n.openPrice {
 		res.maxPrice = n.openPrice
@@ -191,47 +187,37 @@ func updatePrice(o Candle, n Candle, wg *sync.WaitGroup) Candle {
 	}
 
 	res.closePrice = n.openPrice
-	mu.Unlock()
+
 	return res
 }
 
-func updateCandle(candles map[string]Candle, c Candle, wg *sync.WaitGroup) {
-	defer wg.Done()
-	var w sync.WaitGroup
+func updateCandle(candles map[string]Candle, c Candle) {
 	var mu sync.Mutex
 	mu.Lock()
+	defer mu.Unlock()
 	if _, ok := candles[c.ticker]; ok {
-		w.Add(1)
-		candles[c.ticker] = updatePrice(candles[c.ticker], c, &w)
-		w.Wait()
+		candles[c.ticker] = updatePrice(candles[c.ticker], c)
 	} else {
 		candles[c.ticker] = c
 	}
-	mu.Unlock()
 }
 
 func diffMoreThanScale(diff float64, d time.Duration) bool {
 	return diff >= d.Minutes() && math.Abs(diff-d.Minutes()) >= d.Minutes()
 }
 
-func sendCandles(candles map[string]Candle, st time.Time, sc int, out chan Candle, wg *sync.WaitGroup) {
+func sendCandles(candles map[string]Candle, st time.Time, sc int, out chan Candle, done chan bool) {
 	go func() {
-		defer wg.Done()
-		var mu sync.Mutex
-		mu.Lock()
 		for t := range candles {
-			temp := candles[t]
-			temp.time = st
-			temp.scale = sc
-			out <- temp
+			c := candles[t]
+			c.time = st
+			c.scale = sc
+			out <- c
 			delete(candles, t)
-			//candles[t].time = st
-			//candles[t].scale = sc
-			//out <- candles[t]
-			//delete(candles, t)
 		}
-		mu.Unlock()
+		done <- true
 	}()
+
 }
 
 func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.WaitGroup), error) {
@@ -251,20 +237,16 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.Wait
 		240 * time.Minute: TwoHForty,
 	}
 
-	var wg sync.WaitGroup
-	//var mu sync.Mutex
+	done := make(chan bool)
 
 	return func(c Candle, out chan Candle, w *sync.WaitGroup) {
 		go func() {
 			defer w.Done()
-			//mu.Lock()
 			if c.ticker != "empty" {
 				diff := c.time.Sub(startTime).Minutes()
 				if diff >= d.Minutes() {
-					wg.Add(1)
-					sendCandles(candles, startTime, scales[d], out, &wg)
-					wg.Wait()
-
+						sendCandles(candles, startTime, scales[d], out, done)
+						<-done
 					if diffMoreThanScale(diff, d) {
 						startTime = c.time
 					} else {
@@ -275,15 +257,11 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.Wait
 						}
 					}
 				}
-				wg.Add(1)
-				updateCandle(candles, c, &wg)
-				wg.Wait()
+				updateCandle(candles, c)
 			} else {
-				wg.Add(1)
-				sendCandles(candles, startTime, scales[d], out, &wg)
-				wg.Wait()
+				sendCandles(candles, startTime, scales[d], out, done)
+				<-done
 			}
-			//mu.Unlock()
 		}()
 
 	}, nil
@@ -293,10 +271,10 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.Wait
 func processing(in chan string, wg *sync.WaitGroup) (chan Candle, chan error, error) {
 	defer wg.Done()
 	var w sync.WaitGroup
-	//var mu sync.Mutex
 
 	out := make(chan Candle)
 	errc := make(chan error)
+	done := make(chan bool)
 
 	h5, err := handleCandle(5 * time.Minute)
 	if err != nil {
