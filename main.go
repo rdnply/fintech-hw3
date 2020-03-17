@@ -124,7 +124,7 @@ func closeFiles(files []*os.File) {
 	}
 }
 
-func write(in chan Candle, done chan int, names []string) (chan error, error) {
+func write(in chan Candle, names []string, wg *sync.WaitGroup) (chan error, error) {
 	files, err := makeFiles(names)
 	if err != nil {
 		return nil, err
@@ -132,6 +132,7 @@ func write(in chan Candle, done chan int, names []string) (chan error, error) {
 
 	errc := make(chan error)
 	go func() {
+		defer wg.Done()
 		defer close(errc)
 		var w *csv.Writer
 		for c := range in {
@@ -154,7 +155,6 @@ func write(in chan Candle, done chan int, names []string) (chan error, error) {
 			w.Flush()
 		}
 		closeFiles(files)
-		done <- 1
 	}()
 
 	return errc, nil
@@ -220,7 +220,7 @@ func sendCandles(candles map[string]Candle, st time.Time, sc int, out chan Candl
 
 }
 
-func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.WaitGroup), error) {
+func handleCandle(d time.Duration) (func(c Candle, out chan Candle, doneFunc chan bool), error) {
 	const (
 		Start = "2019-01-30T07:00:00Z"
 	)
@@ -239,14 +239,13 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.Wait
 
 	done := make(chan bool)
 
-	return func(c Candle, out chan Candle, w *sync.WaitGroup) {
+	return func(c Candle, out chan Candle, doneFunc chan bool) {
 		go func() {
-			defer w.Done()
 			if c.ticker != "empty" {
 				diff := c.time.Sub(startTime).Minutes()
 				if diff >= d.Minutes() {
-						sendCandles(candles, startTime, scales[d], out, done)
-						<-done
+					sendCandles(candles, startTime, scales[d], out, done)
+					<-done
 					if diffMoreThanScale(diff, d) {
 						startTime = c.time
 					} else {
@@ -262,6 +261,7 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.Wait
 				sendCandles(candles, startTime, scales[d], out, done)
 				<-done
 			}
+			doneFunc <- true
 		}()
 
 	}, nil
@@ -270,16 +270,17 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, w *sync.Wait
 
 func processing(in chan string, wg *sync.WaitGroup) (chan Candle, chan error, error) {
 	defer wg.Done()
-	var w sync.WaitGroup
 
 	out := make(chan Candle)
 	errc := make(chan error)
 	done := make(chan bool)
 
+	handlers := make([]func(c Candle, out chan Candle, done chan bool), 0)
 	h5, err := handleCandle(5 * time.Minute)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	h30, err := handleCandle(30 * time.Minute)
 	if err != nil {
 		return nil, nil, err
@@ -288,6 +289,11 @@ func processing(in chan string, wg *sync.WaitGroup) (chan Candle, chan error, er
 	if err != nil {
 		return nil, nil, err
 	}
+	handlers = append(handlers, h5)
+	handlers = append(handlers, h30)
+	handlers = append(handlers, h240)
+
+
 
 	go func() {
 		defer close(errc)
@@ -299,26 +305,17 @@ func processing(in chan string, wg *sync.WaitGroup) (chan Candle, chan error, er
 				return
 			}
 			if inWorkInterval(c.time) {
-				w.Add(1)
-				h5(c, out, &w)
-				w.Wait()
-				w.Add(1)
-				h30(c, out, &w)
-				w.Wait()
-				w.Add(1)
-				h240(c, out, &w)
-				w.Wait()
+				for _, f := range handlers {
+					f(c, out, done)
+					<-done
+				}
+
 			}
 		}
-		w.Add(1)
-		h5(Candle{ticker:"empty"}, out, &w)
-		w.Wait()
-		w.Add(1)
-		h30(Candle{ticker:"empty"}, out, &w)
-		w.Wait()
-		w.Add(1)
-		h240(Candle{ticker:"empty"}, out, &w)
-		w.Wait()
+		for _, f := range handlers {
+			f(Candle{ticker:"empty"}, out, done)
+			<-done
+		}
 		close(out)
 	}()
 
@@ -344,14 +341,12 @@ func main() {
 		log.Fatal(err)
 	}
 	errcList = append(errcList, errc)
-	done := make(chan int)
 	names := []string{"candles5.csv", "candles30.csv", "candles240.csv"}
-	errc, err = write(out, done, names)
+	wg.Add(1)
+	errc, err = write(out, names, &wg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	errcList = append(errcList, errc)
-
 	wg.Wait()
-	<-done
 }
