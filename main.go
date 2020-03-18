@@ -16,10 +16,14 @@ import (
 )
 
 const (
-	Five = iota
-	Thirty
-	TwoHForty
-	Unknown
+	FirstType = iota
+	SecondType
+	ThirdType
+	UnknownType
+	Duration          = 5
+	IntervalForFirst  = 5
+	IntervalForSecond = 30
+	IntervalForThird  = 240
 )
 
 type Candle struct {
@@ -108,7 +112,7 @@ func makeCandle(r string) (Candle, error) {
 		return Candle{}, fmt.Errorf("can't convert RFC3339 time string into Time: %v", err)
 	}
 
-	out := Candle{rec[Ticker], pr, pr, pr, pr, rfc, Unknown}
+	out := Candle{rec[Ticker], pr, pr, pr, pr, rfc, UnknownType}
 
 	return out, nil
 }
@@ -151,12 +155,12 @@ func write(ctx context.Context, in chan Candle, names []string, wg *sync.WaitGro
 
 		for c := range in {
 			switch {
-			case c.scale == Five:
-				w = csv.NewWriter(files[Five])
-			case c.scale == Thirty:
-				w = csv.NewWriter(files[Thirty])
-			case c.scale == TwoHForty:
-				w = csv.NewWriter(files[TwoHForty])
+			case c.scale == FirstType:
+				w = csv.NewWriter(files[FirstType])
+			case c.scale == SecondType:
+				w = csv.NewWriter(files[SecondType])
+			case c.scale == ThirdType:
+				w = csv.NewWriter(files[ThirdType])
 			}
 
 			s := c.toSlice()
@@ -258,9 +262,9 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, doneFunc cha
 	}
 
 	scales := map[time.Duration]int{
-		5 * time.Minute:   Five,
-		30 * time.Minute:  Thirty,
-		240 * time.Minute: TwoHForty,
+		IntervalForFirst * time.Minute:  FirstType,
+		IntervalForSecond * time.Minute: SecondType,
+		IntervalForThird * time.Minute:  ThirdType,
 	}
 
 	done := make(chan bool)
@@ -294,6 +298,7 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, doneFunc cha
 	}, nil
 }
 
+// nolint: gocyclo
 func processing(ctx context.Context, in chan string, wg *sync.WaitGroup) (chan Candle, chan error, error) {
 	defer wg.Done()
 
@@ -303,24 +308,24 @@ func processing(ctx context.Context, in chan string, wg *sync.WaitGroup) (chan C
 
 	handlers := make([]func(c Candle, out chan Candle, done chan bool), 0)
 
-	h5, err := handleCandle(5 * time.Minute)
+	h1, err := handleCandle(IntervalForFirst * time.Minute)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	h30, err := handleCandle(30 * time.Minute)
+	h2, err := handleCandle(IntervalForSecond * time.Minute)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	h240, err := handleCandle(240 * time.Minute)
+	h3, err := handleCandle(IntervalForThird * time.Minute)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	handlers = append(handlers, h5)
-	handlers = append(handlers, h30)
-	handlers = append(handlers, h240)
+	handlers = append(handlers, h1)
+	handlers = append(handlers, h2)
+	handlers = append(handlers, h3)
 
 	go func() {
 		defer close(errc)
@@ -369,8 +374,8 @@ func checkErrors(errcList []<-chan error) error {
 }
 
 func pipeline(path string) error {
-	duration := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	timeout := Duration * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	defer cancel()
 
@@ -380,6 +385,7 @@ func pipeline(path string) error {
 		names    = []string{"candles_5min.csv", "candles_30min.csv", "candles_240min.csv"}
 	)
 
+	// nolint: gomnd
 	wg.Add(3)
 
 	records, errc, err := readCSVFile(ctx, path, &wg)
@@ -406,7 +412,7 @@ func pipeline(path string) error {
 	wg.Wait()
 
 	if ctx.Err() != nil {
-		return fmt.Errorf("%v with timeout %v", ctx.Err(), duration)
+		return fmt.Errorf("%v with timeout %v", ctx.Err(), timeout)
 	}
 
 	return checkErrors(errcList)
