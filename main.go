@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/csv"
+	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -341,7 +342,7 @@ func pipeline(path string) error {
 	var (
 		wg       sync.WaitGroup
 		errcList []<-chan error
-		names    = []string{"candles5.csv", "candles30.csv", "candles240.csv"}
+		names    = []string{"candles_5min.csv", "candles_30min.csv", "candles_240min.csv"}
 	)
 
 	wg.Add(1)
@@ -368,6 +369,7 @@ func pipeline(path string) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("%v with timeout %v", ctx.Err(), duration)
 	}
+
 	return checkErrors(errcList)
 }
 
@@ -383,7 +385,10 @@ func checkErrors(errcList []<-chan error) error {
 }
 
 func main() {
-	err := pipeline("trades.csv")
+	var file = flag.String("file", "", "The path for file which contains trades")
+	flag.Parse()
+
+	err := pipeline(*file)
 	if err != nil {
 		log.Fatal(err)
 	}
