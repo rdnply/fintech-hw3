@@ -36,6 +36,8 @@ type Candle struct {
 	scale      int
 }
 
+type handler func(c Candle, out chan Candle, done chan bool)
+
 func readCSVFile(ctx context.Context, fileName string, wg *sync.WaitGroup) (chan string, chan error, error) {
 	defer wg.Done()
 
@@ -249,7 +251,7 @@ func sendCandles(candles map[string]Candle, st time.Time, sc int, out chan Candl
 	}()
 }
 
-func handleCandle(d time.Duration) (func(c Candle, out chan Candle, doneFunc chan bool), error) {
+func handleCandle(d time.Duration) (handler, error) {
 	const (
 		Start = "2019-01-30T07:00:00Z"
 	)
@@ -298,7 +300,31 @@ func handleCandle(d time.Duration) (func(c Candle, out chan Candle, doneFunc cha
 	}, nil
 }
 
-// nolint: gocyclo
+func prepareHandlers() ([]handler, error) {
+	handlers := make([]handler, 0)
+
+	h1, err := handleCandle(IntervalForFirst * time.Minute)
+	if err != nil {
+		return nil, err
+	}
+
+	h2, err := handleCandle(IntervalForSecond * time.Minute)
+	if err != nil {
+		return nil, err
+	}
+
+	h3, err := handleCandle(IntervalForThird * time.Minute)
+	if err != nil {
+		return nil, err
+	}
+
+	handlers = append(handlers, h1)
+	handlers = append(handlers, h2)
+	handlers = append(handlers, h3)
+
+	return handlers, nil
+}
+
 func processing(ctx context.Context, in chan string, wg *sync.WaitGroup) (chan Candle, chan error, error) {
 	defer wg.Done()
 
@@ -306,30 +332,16 @@ func processing(ctx context.Context, in chan string, wg *sync.WaitGroup) (chan C
 	errc := make(chan error)
 	done := make(chan bool)
 
-	handlers := make([]func(c Candle, out chan Candle, done chan bool), 0)
-
-	h1, err := handleCandle(IntervalForFirst * time.Minute)
+	handlers, err := prepareHandlers()
 	if err != nil {
 		return nil, nil, err
 	}
-
-	h2, err := handleCandle(IntervalForSecond * time.Minute)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	h3, err := handleCandle(IntervalForThird * time.Minute)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	handlers = append(handlers, h1)
-	handlers = append(handlers, h2)
-	handlers = append(handlers, h3)
 
 	go func() {
-		defer close(errc)
-		defer close(out)
+		defer func() {
+			close(errc)
+			close(out)
+		}()
 
 		for rec := range in {
 			c, err := makeCandle(rec)
